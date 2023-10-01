@@ -17,4 +17,4 @@ RUN go mod download
 
 EXPOSE 8989
 
-CMD ["go", "run", "main.go"]
+CMD ["go", "run", "."]
