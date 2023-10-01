@@ -11,7 +11,7 @@ RUN apk update \
 
 WORKDIR ${ROOT}
 
-COPY go.mod ./
+COPY go.mod go.sum ./
 
 RUN go mod download
 

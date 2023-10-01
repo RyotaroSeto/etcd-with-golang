@@ -22,3 +22,4 @@ services:
     environment:
       - ALLOW_NONE_AUTHENTICATION=yes
       - ETCD_ADVERTISE_CLIENT_URLS=http://etcd:2379
+      - LISTEN_CLIENT_URLS=http://etcd:2379
