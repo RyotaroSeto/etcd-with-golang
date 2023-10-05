@@ -85,32 +85,56 @@ func main() {
 	// PrintResponse(respo)
 
 	// コンパクション:リビジョンを保存してあるデータの古い履歴を削除する
-	client.Put(ctx, "/chapter3/compaction", "hoge")
-	client.Put(ctx, "/chapter3/compaction", "fuga")
-	client.Put(ctx, "/chapter3/compaction", "fuga")
-	resp, err := client.Get(ctx, "/chapter3/compaction")
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println("--- prepared data: ")
-	for i := resp.Kvs[0].CreateRevision; i <= resp.Kvs[0].ModRevision; i++ {
-		r, err := client.Get(ctx, "/chapter3/compaction", clientv3.WithRev(i))
-		if err != nil {
-			log.Fatal(err)
+	// client.Put(ctx, "/chapter3/compaction", "hoge")
+	// client.Put(ctx, "/chapter3/compaction", "fuga")
+	// client.Put(ctx, "/chapter3/compaction", "fuga")
+	// resp, err := client.Get(ctx, "/chapter3/compaction")
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// fmt.Println("--- prepared data: ")
+	// for i := resp.Kvs[0].CreateRevision; i <= resp.Kvs[0].ModRevision; i++ {
+	// 	r, err := client.Get(ctx, "/chapter3/compaction", clientv3.WithRev(i))
+	// 	if err != nil {
+	// 		log.Fatal(err)
+	// 	}
+	// 	fmt.Printf("rev: %d, value: %s\n", i, r.Kvs[0].Value)
+	// }
+	// _, err = client.Compact(ctx, resp.Kvs[0].ModRevision)
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// fmt.Printf("--- compacted: %d\n", resp.Kvs[0].ModRevision)
+	// for i := resp.Kvs[0].CreateRevision; i <= resp.Kvs[0].ModRevision; i++ {
+	// 	r, err := client.Get(ctx, "/chapter3/compaction", clientv3.WithRev(i))
+	// 	if err != nil {
+	// 		fmt.Printf("failed to get: %v\n", err)
+	// 		continue
+	// 	}
+	// 	fmt.Printf("rev: %d, value: %s\n", i, r.Kvs[0].Value)
+	// }
+
+	fmt.Println("------:Watch ")
+	// Watch
+	// キー・バリューの変更を通知するためにWatch APIを提供
+	// 他のプログラムが情報を更新したことを定期的にチェックしていたのでは効率が悪くなるため
+	ch := client.Watch(ctx, "/chapter3/watch/", clientv3.WithPrefix()) // /chapter3/watch/"から始まるすべてのキーを監視対象
+	for resp := range ch {
+		if resp.Err() != nil {
+			log.Fatal(resp.Err())
 		}
-		fmt.Printf("rev: %d, value: %s\n", i, r.Kvs[0].Value)
-	}
-	_, err = client.Compact(ctx, resp.Kvs[0].ModRevision)
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("--- compacted: %d\n", resp.Kvs[0].ModRevision)
-	for i := resp.Kvs[0].CreateRevision; i <= resp.Kvs[0].ModRevision; i++ {
-		r, err := client.Get(ctx, "/chapter3/compaction", clientv3.WithRev(i))
-		if err != nil {
-			fmt.Printf("failed to get: %v\n", err)
-			continue
+		for _, ev := range resp.Events {
+			switch ev.Type {
+			case clientv3.EventTypePut:
+				switch {
+				case ev.IsCreate():
+					fmt.Printf("CREATE %q : %q\n", ev.Kv.Key, ev.Kv.Value)
+				case ev.IsModify():
+					fmt.Printf("MODIFY %q : %q\n", ev.Kv.Key, ev.Kv.Value)
+				}
+			case clientv3.EventTypeDelete:
+				fmt.Printf("DELETE %q : %q\n", ev.Kv.Key, ev.Kv.Value)
+			}
 		}
-		fmt.Printf("rev: %d, value: %s\n", i, r.Kvs[0].Value)
 	}
 }
