@@ -10,6 +10,7 @@ import (
 	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/client/v3/concurrency"
 )
 
 func main() {
@@ -286,6 +287,20 @@ func main() {
 	time.Sleep(1 * time.Second)
 	resp, _ := client.Get(context.TODO(), key)
 	fmt.Println(string(resp.Kvs[0].Value))
+
+	// Session
+	// 作成したキーにリース期間が設定されるため、プロセスが不意に終了してもキーの有効期限が過ぎたらロックは解除される
+	// プロセスが生きている間はリース期間を更新し続けるようにもなっている
+	session, err := concurrency.NewSession(client) // デフォルトでのリース期間は60秒に設定
+	// この時間を変更したい場合は、次のようにconcurrency.WithTTL()を利用することができる
+	// session, err := concurrency.NewSession(client, concurrency.WithTTL(180))
+	// ロックを取得したプロセスが何か処理をしているときに、etcdとの接続が切れてしまっていたりリースを失効していた場合は、処理を中止すべき
+	select {
+	case <-session.Done(): // セッションが切れた通知を受け取ることが可能
+		log.Fatal("session has been orphaned")
+	}
+
+	// Mutex
 }
 
 func addValueTxn(client *clientv3.Client, key string, d int) {
