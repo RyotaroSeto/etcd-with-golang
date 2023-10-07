@@ -10,7 +10,6 @@ import (
 	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.etcd.io/etcd/client/v3/namespace"
 )
 
 func main() {
@@ -238,29 +237,110 @@ func main() {
 	// 	time.Sleep(1 * time.Second)
 	// }
 
-	// Namespace
-	// キーにはアプリケーションごとにプレフィックスをつけるのが一般的
-	// アプリケーションを開発する際にすべてのキーにプレフィックスを指定するのは少々めんどう
-	newClient := namespace.NewKV(client.KV, "/chapter3")
-	_, err = newClient.Put(ctx, "/ns/1", "hoge")
+	// // Namespace
+	// // キーにはアプリケーションごとにプレフィックスをつけるのが一般的
+	// // アプリケーションを開発する際にすべてのキーにプレフィックスを指定するのは少々めんどう
+	// newClient := namespace.NewKV(client.KV, "/chapter3")
+	// _, err = newClient.Put(ctx, "/ns/1", "hoge")
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// resp, _ := client.Get(ctx, "/chapter3/ns/1")
+	// fmt.Printf("%s: %s\n", resp.Kvs[0].Key, resp.Kvs[0].Value)
+
+	// _, err = client.Put(ctx, "/chapter3/ns/2", "test")
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// resp, _ = newClient.Get(ctx, "/ns/2")
+	// fmt.Printf("%s: %s\n", resp.Kvs[0].Key, resp.Kvs[0].Value)
+
+	// // namespace適用後にキーバリュー操作用のクライアントやWatch用のクライアントを個別に管理するのは面倒
+	// // 次のように既存のクライアントの機能を上書きしてしまうのがおすすめ
+	// client.KV = namespace.NewKV(client.KV, "/chapter3")
+	// client.Watcher = namespace.NewWatcher(client.Watcher, "/chapter3") // namespaceをWatch関連の操作に適用する
+	// client.Lease = namespace.NewLease(client.Lease, "/chapter3")       // Lease関連の操作に適用する
+
+	// Transaction
+	// etcdにアクセスするクライアントが常に1つしか存在しないのであれば何も問題はない
+	// 現実には複数のクライアントが同時にetcdにデータを書き込んだり読み込んだりする
+	// key := "/chapter4/conflict"
+	// _, err = client.Put(ctx, key, "10")
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// go addValue(client, key, 5)
+	// go addValue(client, key, -3)
+	// time.Sleep(1 * time.Second)
+	// resp, _ := client.Get(ctx, key)
+	// fmt.Println(string(resp.Kvs[0].Value)) // 12になってほしいところだが15になったり7になったり
+
+	// 実際のTransaction利用
+	key := "/chapter4/txn"
+	_, err = client.Put(ctx, key, "10")
 	if err != nil {
 		log.Fatal(err)
 	}
-	resp, _ := client.Get(ctx, "/chapter3/ns/1")
-	fmt.Printf("%s: %s\n", resp.Kvs[0].Key, resp.Kvs[0].Value)
+	go addValueTxn(client, key, 5)
+	go addValueTxn(client, key, -3)
+	time.Sleep(1 * time.Second)
+	resp, _ := client.Get(context.TODO(), key)
+	fmt.Println(string(resp.Kvs[0].Value))
+}
 
-	_, err = client.Put(ctx, "/chapter3/ns/2", "test")
-	if err != nil {
+func addValueTxn(client *clientv3.Client, key string, d int) {
+RETRY:
+	resp, _ := client.Get(context.TODO(), key)
+	rev := resp.Kvs[0].ModRevision
+	value, _ := strconv.Atoi(string(resp.Kvs[0].Value))
+	value += d
+	tresp, err := client.Txn(context.TODO()).
+		If(clientv3.Compare(clientv3.ModRevision(key), "=", rev)).
+		Then(clientv3.OpPut(key, strconv.Itoa(value))).
+		Commit()
+	if err != nil { // トランザクションのIfの条件が成立しなくてもエラーにはならない
 		log.Fatal(err)
 	}
-	resp, _ = newClient.Get(ctx, "/ns/2")
-	fmt.Printf("%s: %s\n", resp.Kvs[0].Key, resp.Kvs[0].Value)
+	if !tresp.Succeeded {
+		goto RETRY // データが書き込めなかった場合にgotoを使って最初から処理をやり直し
+	}
+}
 
-	// namespace適用後にキーバリュー操作用のクライアントやWatch用のクライアントを個別に管理するのは面倒
-	// 次のように既存のクライアントの機能を上書きしてしまうのがおすすめ
-	client.KV = namespace.NewKV(client.KV, "/chapter3")
-	client.Watcher = namespace.NewWatcher(client.Watcher, "/chapter3") // namespaceをWatch関連の操作に適用する
-	client.Lease = namespace.NewLease(client.Lease, "/chapter3")       // Lease関連の操作に適用する
+// トランザクション記法
+// If(・・・).Then(・・・).Else(・・・).Commit()が使える
+// If(
+//
+//	clientv3.Compare(clientv3.ModRevision(key1), "=", rev1),
+//	clientv3.Compare(clientv3.ModRevision(key2), "=", rev2),
+//
+// ).
+// Then(・・・).
+// Commit()
+// 比較演算子は"="の他に"!="、"<"、">"が利用できます。
+// clientv3.Value()で値の比較、clientv3.Version()でバージョンの比較、clientv3.CreateRevision()でCreateRevisionの比較をすることが可能
+// If(clientv3util.KeyExists(key))やIf(clientv3util.KeyMissing(key))を利用すれば、キーの有無によって条件分岐をすることが可能
+func exampleTxn(client *clientv3.Client, key1, key2, value1 string, d int) error {
+	tresp, err := client.Txn(context.TODO()).
+		Then(
+			clientv3.OpPut(key1, value1),
+			clientv3.OpDelete(key2),
+		).
+		Commit()
+	if err != nil {
+		return err
+	}
+	presp := tresp.Responses[0].GetResponsePut()
+	dresp := tresp.Responses[1].GetResponseDeleteRange()
+	fmt.Println(presp, dresp)
+	return nil
+}
+
+// etcdから現在の値を読み取り、そこに引数で指定した値を追加して保存する関数
+func addValue(client *clientv3.Client, key string, d int) {
+	resp, _ := client.Get(context.TODO(), key)
+	value, _ := strconv.Atoi(string(resp.Kvs[0].Value))
+	value += d
+	client.Put(context.TODO(), key, strconv.Itoa(value))
 }
 
 func nextRev() int64 {
