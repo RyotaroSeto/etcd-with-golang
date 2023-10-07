@@ -3,10 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
+	"os"
+	"strconv"
 	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/client/v3/namespace"
 )
 
 func main() {
@@ -114,27 +118,183 @@ func main() {
 	// 	fmt.Printf("rev: %d, value: %s\n", i, r.Kvs[0].Value)
 	// }
 
-	fmt.Println("------:Watch ")
-	// Watch
-	// キー・バリューの変更を通知するためにWatch APIを提供
-	// 他のプログラムが情報を更新したことを定期的にチェックしていたのでは効率が悪くなるため
-	ch := client.Watch(ctx, "/chapter3/watch/", clientv3.WithPrefix()) // /chapter3/watch/"から始まるすべてのキーを監視対象
-	for resp := range ch {
-		if resp.Err() != nil {
-			log.Fatal(resp.Err())
-		}
-		for _, ev := range resp.Events {
-			switch ev.Type {
-			case clientv3.EventTypePut:
-				switch {
-				case ev.IsCreate():
-					fmt.Printf("CREATE %q : %q\n", ev.Kv.Key, ev.Kv.Value)
-				case ev.IsModify():
-					fmt.Printf("MODIFY %q : %q\n", ev.Kv.Key, ev.Kv.Value)
-				}
-			case clientv3.EventTypeDelete:
-				fmt.Printf("DELETE %q : %q\n", ev.Kv.Key, ev.Kv.Value)
-			}
-		}
+	// fmt.Println("------:Watch ")
+	// // Watch
+	// // キー・バリューの変更を通知するためにWatch APIを提供
+	// // 他のプログラムが情報を更新したことを定期的にチェックしていたのでは効率が悪くなるため
+	// ch := client.Watch(ctx, "/chapter3/watch/", clientv3.WithPrefix()) // /chapter3/watch/"から始まるすべてのキーを監視対象
+	// for resp := range ch {
+	// 	if resp.Err() != nil {
+	// 		log.Fatal(resp.Err())
+	// 	}
+	// 	for _, ev := range resp.Events {
+	// 		switch ev.Type {
+	// 		case clientv3.EventTypePut:
+	// 			switch {
+	// 			case ev.IsCreate():
+	// 				fmt.Printf("CREATE %q : %q\n", ev.Kv.Key, ev.Kv.Value)
+	// 			case ev.IsModify():
+	// 				fmt.Printf("MODIFY %q : %q\n", ev.Kv.Key, ev.Kv.Value)
+	// 			}
+	// 		case clientv3.EventTypeDelete:
+	// 			fmt.Printf("DELETE %q : %q\n", ev.Kv.Key, ev.Kv.Value)
+	// 		}
+	// 	}
+	// }
+
+	// // 取りこぼしを防ぐ
+	// // Watch APIを呼び出すと、呼び出した時点からの変更が通知される
+	// // Watchを利用しているプログラムが停止している間にetcdに変更が加えられた場合、その変更を取りこぼすことになってしまう
+	// // atch APIを呼び出すときにclientv3.WithRev()オプションを指定することで、特定のリビジョンからの変更をすべて受け取ることが可能
+	// rev := nextRev()
+	// fmt.Printf("loaded revision: %d\n", rev)
+	// ch := client.Watch(ctx, "/chapter3/watch_file", clientv3.WithRev(rev))
+	// for resp := range ch {
+	// 	if resp.Err() != nil {
+	// 		log.Fatal(resp.Err())
+	// 	}
+	// 	for _, ev := range resp.Events {
+	// 		doSomething(ev)
+	// 		err := saveRev(ev.Kv.ModRevision)
+	// 		if err != nil {
+	// 			log.Fatal(err)
+	// 		}
+	// 		fmt.Printf("saved: %d\n", ev.Kv.ModRevision)
+	// 	}
+	// }
+
+	// 	// Watchとコンパクション
+	// 	// リビジョンを指定してWatchを開始した場合、そのキーがすでにコンパクションされている可能性がある
+	// 	// WatchResponseのCompactRevisionを利用すると、コンパクションされていない中で最も古いリビジョンが取得できるので、このリビジョンを使ってWatchを再開するなどの処理を行える
+	// 	go func() {
+	// 		for i := 0; i < 10; i++ {
+	// 			client.Put(ctx, "/chapter3/watch_compact", strconv.Itoa(i))
+	// 			time.Sleep(100 * time.Millisecond)
+	// 		}
+	// 	}()
+	// 	time.Sleep(300 * time.Millisecond)
+	// 	resp, err := client.Get(ctx, "/chapter3/watch_compact")
+	// 	if err != nil || resp.Count == 0 {
+	// 		log.Fatal(err)
+	// 	}
+	// 	rev := resp.Kvs[0].ModRevision + 1
+	// 	time.Sleep(300 * time.Millisecond)
+	// 	resp, err = client.Get(ctx, "/chapter3/watch_compact")
+	// 	if err != nil || resp.Count == 0 {
+	// 		log.Fatal(err)
+	// 	}
+	// 	_, err = client.Compact(ctx, resp.Kvs[0].ModRevision)
+	// 	if err != nil {
+	// 		log.Fatal(err)
+	// 	}
+	// RETRY:
+	// 	fmt.Printf("watch from rev: %d\n", rev)
+	// 	ch := client.Watch(ctx, "/chapter3/watch_compact", clientv3.WithRev(rev))
+	// 	for resp := range ch {
+	// 		if resp.Err() == rpctypes.ErrCompacted {
+	// 			rev = resp.CompactRevision
+	// 			goto RETRY
+	// 		} else if resp.Err() != nil {
+	// 			log.Fatal(resp.Err())
+	// 		}
+	// 		for _, ev := range resp.Events {
+	// 			fmt.Printf("%s %q : %q\n", ev.Type, ev.Kv.Key, ev.Kv.Value)
+	// 		}
+	// 	}
+
+	// // Lease
+	// // キー・バリューに有効期限を指定することができる。
+	// // キーの登録時に有効期限を指定しておくと、その期限が過ぎたときに対象のキーは自動的に削除される
+	// lease, err := client.Grant(ctx, 5) // 有効期限を秒単位で指定
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// _, err = client.Put(ctx, "/chapter3/lease", "value", clientv3.WithLease(lease.ID))
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// _, err = client.KeepAliveOnce(ctx, lease.ID) // KeepAliveOnce()を呼び出すと、有効期限が最初に指定した時間分だけ延長される
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// // _, err = client.KeepAlive(ctx, lease.ID) // KeepAliveOnce()を周期的に呼び出すための仕組みとして、KeepAlive()がある
+	// // if err != nil {
+	// // 	log.Fatal(err)
+	// // }
+	// _, err = client.Revoke(ctx, lease.ID) // 指定した期限までまだ時間がある場合でも、そのキーを失効させたい場合、Revoke()を利用
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// for {
+	// 	resp, err := client.Get(ctx, "/chapter3/lease")
+	// 	if err != nil {
+	// 		log.Fatal(err)
+	// 	}
+	// 	if resp.Count == 0 {
+	// 		fmt.Println("'/chapter3/lease' disappeared")
+	// 		break
+	// 	}
+	// 	fmt.Printf("[%v] %s\n", time.Now().Format("15:04:05"), resp.Kvs[0].Value)
+	// 	time.Sleep(1 * time.Second)
+	// }
+
+	// Namespace
+	// キーにはアプリケーションごとにプレフィックスをつけるのが一般的
+	// アプリケーションを開発する際にすべてのキーにプレフィックスを指定するのは少々めんどう
+	newClient := namespace.NewKV(client.KV, "/chapter3")
+	_, err = newClient.Put(ctx, "/ns/1", "hoge")
+	if err != nil {
+		log.Fatal(err)
 	}
+	resp, _ := client.Get(ctx, "/chapter3/ns/1")
+	fmt.Printf("%s: %s\n", resp.Kvs[0].Key, resp.Kvs[0].Value)
+
+	_, err = client.Put(ctx, "/chapter3/ns/2", "test")
+	if err != nil {
+		log.Fatal(err)
+	}
+	resp, _ = newClient.Get(ctx, "/ns/2")
+	fmt.Printf("%s: %s\n", resp.Kvs[0].Key, resp.Kvs[0].Value)
+
+	// namespace適用後にキーバリュー操作用のクライアントやWatch用のクライアントを個別に管理するのは面倒
+	// 次のように既存のクライアントの機能を上書きしてしまうのがおすすめ
+	client.KV = namespace.NewKV(client.KV, "/chapter3")
+	client.Watcher = namespace.NewWatcher(client.Watcher, "/chapter3") // namespaceをWatch関連の操作に適用する
+	client.Lease = namespace.NewLease(client.Lease, "/chapter3")       // Lease関連の操作に適用する
+}
+
+func nextRev() int64 {
+	p := "./last_revision"
+	f, err := os.Open(p)
+	if err != nil {
+		os.Remove(p)
+		return 0
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		os.Remove(p)
+		return 0
+	}
+	rev, err := strconv.ParseInt(string(data), 10, 64)
+	if err != nil {
+		os.Remove(p)
+		return 0
+	}
+	return rev + 1
+}
+
+func saveRev(rev int64) error {
+	p := "./last_revision"
+	f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|os.O_SYNC, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.WriteString(strconv.FormatInt(rev, 10))
+	return err
+}
+
+func doSomething(ev *clientv3.Event) {
+	fmt.Printf("[%d] %s %q : %q\n", ev.Kv.ModRevision, ev.Type, ev.Kv.Key, ev.Kv.Value)
 }
