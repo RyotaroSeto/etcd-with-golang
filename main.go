@@ -276,31 +276,79 @@ func main() {
 	// resp, _ := client.Get(ctx, key)
 	// fmt.Println(string(resp.Kvs[0].Value)) // 12になってほしいところだが15になったり7になったり
 
-	// 実際のTransaction利用
-	key := "/chapter4/txn"
-	_, err = client.Put(ctx, key, "10")
+	// // 実際のTransaction利用
+	// key := "/chapter4/txn"
+	// _, err = client.Put(ctx, key, "10")
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// go addValueTxn(client, key, 5)
+	// go addValueTxn(client, key, -3)
+	// time.Sleep(1 * time.Second)
+	// resp, _ := client.Get(context.TODO(), key)
+	// fmt.Println(string(resp.Kvs[0].Value))
+
+	// // Session
+	// // 作成したキーにリース期間が設定されるため、プロセスが不意に終了してもキーの有効期限が過ぎたらロックは解除される
+	// // プロセスが生きている間はリース期間を更新し続けるようにもなっている
+	// session, err := concurrency.NewSession(client) // デフォルトでのリース期間は60秒に設定
+	// // この時間を変更したい場合は、次のようにconcurrency.WithTTL()を利用することができる
+	// // session, err := concurrency.NewSession(client, concurrency.WithTTL(180))
+	// // ロックを取得したプロセスが何か処理をしているときに、etcdとの接続が切れてしまっていたりリースを失効していた場合は、処理を中止すべき
+	// select {
+	// case <-session.Done(): // セッションが切れた通知を受け取ることが可能
+	// 	log.Fatal("session has been orphaned")
+	// }
+
+	// // Mutex
+	// // etcdの提供するMutexでは異なるサーバ上のプロセス間での排他制御が可能
+	session, err := concurrency.NewSession(client)
 	if err != nil {
 		log.Fatal(err)
 	}
-	go addValueTxn(client, key, 5)
-	go addValueTxn(client, key, -3)
-	time.Sleep(1 * time.Second)
-	resp, _ := client.Get(context.TODO(), key)
-	fmt.Println(string(resp.Kvs[0].Value))
-
-	// Session
-	// 作成したキーにリース期間が設定されるため、プロセスが不意に終了してもキーの有効期限が過ぎたらロックは解除される
-	// プロセスが生きている間はリース期間を更新し続けるようにもなっている
-	session, err := concurrency.NewSession(client) // デフォルトでのリース期間は60秒に設定
-	// この時間を変更したい場合は、次のようにconcurrency.WithTTL()を利用することができる
-	// session, err := concurrency.NewSession(client, concurrency.WithTTL(180))
-	// ロックを取得したプロセスが何か処理をしているときに、etcdとの接続が切れてしまっていたりリースを失効していた場合は、処理を中止すべき
+	// mutex := concurrency.NewMutex(session, "/chapter4/mutex")
+	// err = mutex.Lock(context.TODO()) // すでに他のプロセスがロックを取得済みだった場合は、ロックが取得できるまでブロックされます。 ロックが取得できなかったときにタイムアウトさせたい場合は、タイムアウトを設定したcontextを渡します。
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// fmt.Println("acquired lock")
+	// time.Sleep(5 * time.Second)
+	// err = mutex.Unlock(context.TODO()) // deferを利用してスコープを抜けたときに必ずロックを解放するのがおすすめ
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// fmt.Println("released lock")
+	// ロックした後に一度ネットワーク接続が切れていたり、Sessionのリース期間が終了するかもしれない
+	// プログラムは自分がロックしたつもりで動作しているのに、実際にはロックされていないという状況に陥ってしまう
+	// そこで、ロックを取ったあとにetcdのキーバリューを操作する際には、トランザクションのIf条件にMutex.IsOwner()を指定する。
+	mutex := concurrency.NewMutex(session, "/chapter4/mutex_txn")
+RETRY:
 	select {
-	case <-session.Done(): // セッションが切れた通知を受け取ることが可能
+	case <-session.Done():
 		log.Fatal("session has been orphaned")
+	default:
+	}
+	err = mutex.Lock(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	resp, err := client.Txn(context.TODO()).
+		If(mutex.IsOwner()).
+		Then(clientv3.OpPut("/chapter4/mutex_owner", "test")).
+		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if !resp.Succeeded {
+		fmt.Println("the lock was not acquired")
+		mutex.Unlock(context.TODO())
+		goto RETRY
+	}
+	err = mutex.Unlock(context.TODO())
+	if err != nil {
+		log.Fatal(err)
 	}
 
-	// Mutex
 }
 
 func addValueTxn(client *clientv3.Client, key string, d int) {
