@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"os"
 	"strconv"
 	"time"
@@ -302,10 +304,10 @@ func main() {
 
 	// // Mutex
 	// // etcdの提供するMutexでは異なるサーバ上のプロセス間での排他制御が可能
-	session, err := concurrency.NewSession(client)
-	if err != nil {
-		log.Fatal(err)
-	}
+	// session, err := concurrency.NewSession(client)
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
 	// mutex := concurrency.NewMutex(session, "/chapter4/mutex")
 	// err = mutex.Lock(context.TODO()) // すでに他のプロセスがロックを取得済みだった場合は、ロックが取得できるまでブロックされます。 ロックが取得できなかったときにタイムアウトさせたい場合は、タイムアウトを設定したcontextを渡します。
 	// if err != nil {
@@ -321,34 +323,173 @@ func main() {
 	// ロックした後に一度ネットワーク接続が切れていたり、Sessionのリース期間が終了するかもしれない
 	// プログラムは自分がロックしたつもりで動作しているのに、実際にはロックされていないという状況に陥ってしまう
 	// そこで、ロックを取ったあとにetcdのキーバリューを操作する際には、トランザクションのIf条件にMutex.IsOwner()を指定する。
-	mutex := concurrency.NewMutex(session, "/chapter4/mutex_txn")
-RETRY:
-	select {
-	case <-session.Done():
-		log.Fatal("session has been orphaned")
-	default:
-	}
-	err = mutex.Lock(ctx)
+	// 	mutex := concurrency.NewMutex(session, "/chapter4/mutex_txn")
+	// RETRY:
+	// 	select {
+	// 	case <-session.Done():
+	// 		log.Fatal("session has been orphaned")
+	// 	default:
+	// 	}
+	// 	err = mutex.Lock(ctx)
+	// 	if err != nil {
+	// 		log.Fatal(err)
+	// 	}
+	// 	resp, err := client.Txn(context.TODO()).
+	// 		If(mutex.IsOwner()).
+	// 		Then(clientv3.OpPut("/chapter4/mutex_owner", "test")).
+	// 		Commit()
+	// 	if err != nil {
+	// 		log.Fatal(err)
+	// 	}
+	// 	if !resp.Succeeded {
+	// 		fmt.Println("the lock was not acquired")
+	// 		mutex.Unlock(context.TODO())
+	// 		goto RETRY
+	// 	}
+	// 	err = mutex.Unlock(context.TODO())
+	// 	if err != nil {
+	// 		log.Fatal(err)
+	// 	}
+
+	// STM(Software Transactional Memory)
+	// 上記だと排他制御が複雑のため、簡単に排他制御を記述することが可能な方法
+	key := "/chapter4/stm"
+	_, err = client.Put(ctx, key, "10")
 	if err != nil {
 		log.Fatal(err)
 	}
-	resp, err := client.Txn(context.TODO()).
-		If(mutex.IsOwner()).
-		Then(clientv3.OpPut("/chapter4/mutex_owner", "test")).
-		Commit()
+	go addValueSTM(client, key, 5)
+	go addValueSTM(client, key, -3)
+
+	time.Sleep(1 * time.Second)
+	resp, _ := client.Get(context.TODO(), key)
+	fmt.Println(string(resp.Kvs[0].Value))
+
+	// トランザクション分離レベル
+	// 上のほうが分離レベルが高くデータの不整合が発生しにくくなりますが、その代わりに並列実行がしにくくなる
+	// SerializableSnapshot(デフォルト)
+	// Serializable
+	// RepeatableReads
+	// ReadCommitted
+
+	//fuzzyRead(client)
+	phantomRead(client)
+
+	// Leader Election
+	// 異なるサーバー上で動作する複数のプロセスの中から、1つのプロセスをリーダーとして選出する
+	flag.Parse()
+	if flag.NArg() != 1 {
+		log.Fatal("usage: ./leader NAME")
+	}
+	name := flag.Arg(0)
+	s, err := concurrency.NewSession(client, concurrency.WithTTL(30))
 	if err != nil {
 		log.Fatal(err)
 	}
-	if !resp.Succeeded {
-		fmt.Println("the lock was not acquired")
-		mutex.Unlock(context.TODO())
-		goto RETRY
+	defer s.Close()
+	e := concurrency.NewElection(s, "/chapter4/leader")
+
+	err = e.Campaign(context.TODO(), name)
+	if err != nil {
+		log.Fatal(err)
 	}
-	err = mutex.Unlock(context.TODO())
+	for i := 0; i < 10; i++ {
+		fmt.Println(name + " is a leader.")
+		time.Sleep(3 * time.Second)
+	}
+	err = e.Resign(context.TODO())
 	if err != nil {
 		log.Fatal(err)
 	}
 
+}
+
+func fuzzyRead(client *clientv3.Client) {
+	addValue := func(d int) {
+		_, err := concurrency.NewSTM(client, func(stm concurrency.STM) error {
+			v1 := stm.Get("/chapter4/iso/fuzzy")
+			value, err := strconv.Atoi(v1)
+			if err != nil {
+				return err
+			}
+			value += d
+			time.Sleep(time.Duration(rand.Intn(3)) * time.Second)
+			v2 := stm.Get("/chapter4/iso/fuzzy")
+			if v1 != v2 {
+				// ReadCommittedが正しく実装されているならここでファジーリードが発生するはず。
+				// しかしetcd v3.4.13では発生しない
+				fmt.Printf("fuzzy:%d, %s, %s\n", d, v1, v2)
+			}
+			stm.Put("/chapter4/iso/fuzzy", strconv.Itoa(value))
+			return nil
+		}, concurrency.WithIsolation(concurrency.ReadCommitted))
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	_, err := client.Put(context.TODO(), "/chapter4/iso/fuzzy", "10")
+	if err != nil {
+		log.Fatal(err)
+	}
+	go addValue(5)
+	go addValue(-3)
+
+	time.Sleep(5 * time.Second)
+	// トランザクションにもなっていないので、結果は7になったり15になったりばらつく。
+	resp, _ := client.Get(context.TODO(), "/chapter4/iso/fuzzy")
+	fmt.Println(string(resp.Kvs[0].Value))
+}
+
+func phantomRead(client *clientv3.Client) {
+	addValue := func(d int) {
+		_, err := concurrency.NewSTM(client, func(stm concurrency.STM) error {
+			v1 := stm.Get("/chapter4/iso/phantom/key1")
+			value := 0
+			if len(v1) != 0 {
+				value, _ = strconv.Atoi(v1)
+			}
+			value += d
+			time.Sleep(time.Duration(rand.Intn(3)) * time.Second)
+			v2 := stm.Get("/chapter4/iso/phantom/key2")
+			if v1 != v2 {
+				// key1とkey2の値は本来は同じはずである。
+				// しかし読み取るタイミングが異なったせいで異なる値が入ってしまうケースがある。
+				// これがファントムリード
+				fmt.Printf("phantom:%d, %s, %s\n", d, v1, v2)
+			}
+			stm.Put("/chapter4/iso/phantom/key1", strconv.Itoa(value))
+			stm.Put("/chapter4/iso/phantom/key2", strconv.Itoa(value))
+			return nil
+		}, concurrency.WithIsolation(concurrency.RepeatableReads)) // RepeatableReadsを指定したときだけファントムリードが発生する
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	_, err := client.Delete(context.TODO(), "/chapter4/iso/phantom/", clientv3.WithPrefix())
+	if err != nil {
+		log.Fatal(err)
+	}
+	go addValue(5)
+	go addValue(-3)
+
+	time.Sleep(5 * time.Second)
+	resp, _ := client.Get(context.TODO(), "/chapter4/iso/phantom/key1")
+	fmt.Println(string(resp.Kvs[0].Value))
+}
+
+func addValueSTM(client *clientv3.Client, key string, d int) {
+	_, err := concurrency.NewSTM(client, func(stm concurrency.STM) error {
+		v := stm.Get(key)
+		value, _ := strconv.Atoi(v)
+		value += d
+		stm.Put(key, strconv.Itoa(value))
+		return nil
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
 }
 
 func addValueTxn(client *clientv3.Client, key string, d int) {
