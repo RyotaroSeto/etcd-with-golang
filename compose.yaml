@@ -33,8 +33,11 @@ services:
       - "8201:8201"
     cap_add:
       - IPC_LOCK
-    healthcheck:
-      retries: 5
     environment:
       VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8201"
       VAULT_DEV_ROOT_TOKEN_ID:  "myroot"
+    healthcheck:
+      test: wget http://127.0.0.1:8200/v1/sys/health
+      interval: 2s
+      timeout: 10s
+      retries: 5
