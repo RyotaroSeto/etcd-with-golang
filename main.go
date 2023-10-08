@@ -16,14 +16,24 @@ import (
 )
 
 func main() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err := NewVault()
+	if err != nil {
+		log.Fatal(err)
+	}
+	// s, err := vault.Secrets.KvV2Read(ctx, "foo", vault.WithMountPath("secret"))
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// log.Println("secret retrieved:", s.Data.Data)
+
 	client, err := NewEtcdClient()
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer client.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
 
 	// resp, err := client.MemberList(ctx)
 	// if err != nil {
